@@ -78,6 +78,27 @@
   .sol-block h4 { margin: 4px 0; color: var(--amber); }
   #global-error { display: none; }
   .spacer { flex: 1; }
+  .tabs { display: flex; gap: 8px; margin-bottom: 16px; }
+  .tab {
+    background: var(--panel2); color: var(--muted); border: 1px solid var(--line);
+    border-radius: 8px; padding: 9px 18px; font-weight: 600; cursor: pointer;
+  }
+  .tab.active { background: var(--accent); color: #06121f; border-color: var(--accent); }
+  .panel[hidden] { display: none; }
+  .assign-inputs { display: flex; flex-wrap: wrap; gap: 16px 24px; }
+  .assign-inputs label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); }
+  .assign-inputs label b { color: var(--text); font-weight: 600; }
+  .assign-status {
+    background: var(--panel2); border: 1px solid var(--line); border-radius: 8px;
+    padding: 10px 14px; margin-bottom: 12px; color: var(--muted);
+  }
+  .assign-status.busy { border-color: var(--accent); color: var(--text); }
+  .assign-status.ok { border-color: var(--green); color: #7ee2a0; }
+  .assign-status.bad { border-color: var(--red); color: #ff9d97; }
+  #assign-error { display: none; margin-bottom: 12px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+  .legend span { font-size: 12.5px; color: var(--muted); }
+  .legend code { color: var(--text); }
   footer { color: var(--muted); text-align: center; padding: 24px; font-size: 12.5px; }
 </style>
 </head>
@@ -87,6 +108,12 @@
   <p>把地服导出的「当地时间」航段解析为唯一 UTC 航段链，避免夏令时切换时错误入仓。</p>
 </header>
 <main>
+  <div class="tabs" role="tablist">
+    <button class="tab active" data-tab="clean" role="tab">① 航段时间清洗</button>
+    <button class="tab" data-tab="assign" role="tab">② 飞参归段</button>
+  </div>
+
+  <div class="panel" id="panel-clean">
   <div class="card">
     <div class="upload-bar">
       <input type="file" id="fileInput" accept=".csv,text/csv">
@@ -118,8 +145,52 @@
 
   <div id="summary"></div>
   <div id="results"></div>
+  </div>
+
+  <div class="panel" id="panel-assign" hidden>
+    <div class="card">
+      <h2 style="margin:0 0 6px;font-size:17px">🛰 飞参采样归段</h2>
+      <p class="note" style="margin-top:0">
+        上传 1 份飞参 CSV 与 1～4 份「航段时间清洗」导出的 UTC 航段 CSV。按机尾号匹配
+        起降区间（含起飞、不含落地），结果保留采样原列与行序，并追加归段标记。
+      </p>
+      <div class="assign-inputs">
+        <label><b>飞参 CSV</b>
+          <input type="file" id="assignSamplesInput" accept=".csv,text/csv">
+        </label>
+        <label><b>UTC 航段 CSV（1～4 份）</b>
+          <input type="file" id="assignSegmentsInput" accept=".csv,text/csv" multiple>
+        </label>
+      </div>
+      <div class="upload-bar" style="margin-top:14px">
+        <button class="secondary" id="assignLoadSampleBtn">📦 载入航段重叠样例</button>
+        <button id="assignBtn" disabled>开始归段</button>
+        <span class="file-name" id="assignFileNames">未选择文件</span>
+      </div>
+      <div class="legend">
+        <span>追加列：<code>match_status</code> = <code>matched</code> / <code>unmatched</code> / <code>multiple</code>；</span>
+        <span>唯一命中时填 <code>segment_file_no</code>（航段文件上传序号）与 <code>segment_seq</code>。</span>
+      </div>
+      <details>
+        <summary>归段规则与限制</summary>
+        <ul>
+          <li>飞参必含 <code>tail_number</code>、<code>sample_utc</code>，不要求按时间排序；其余列原样保留。</li>
+          <li>航段 CSV 必含 <code>tail_number,seq,dep_utc,arr_utc</code>，一般为清洗页导出的 UTC CSV。</li>
+          <li>匹配条件：<code>dep_utc ≤ sample_utc &lt; arr_utc</code>（含起飞、不含落地）。</li>
+          <li>不同航段文件的记录分别计数；命中 0 条标 <code>unmatched</code>，命中 2 条及以上标 <code>multiple</code>。</li>
+          <li>单次上限：200 万条采样、合计 20 万个航段；航段文件 1～4 份。</li>
+          <li>任一坏行会指出文件与数据行号，整次处理不返回部分结果；全部结果写完后才开始下载。</li>
+        </ul>
+      </details>
+    </div>
+
+    <div class="card error-box" id="assign-error"></div>
+    <div id="assign-status"></div>
+    <div id="assign-summary"></div>
+    <div id="assign-download"></div>
+  </div>
 </main>
-<footer>仅整链唯一解的机尾允许入仓 · 重复时刻双候选求解 · 不存在时刻硬性报错</footer>
+<footer>仅整链唯一解的机尾允许入仓 · 重复时刻双候选求解 · 不存在时刻硬性报错 · 飞参逐行流式归段</footer>
 
 <script>
 let currentFile = null;
@@ -135,6 +206,14 @@ const STATUS_META = {
   multiple:    {label: '多解 · 禁止导出',   cls: 'multiple'},
   error:       {label: '数据错误 · 禁止导出', cls: 'error'},
 };
+
+// ---- 页签切换 ----
+document.querySelectorAll('.tab').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(b => b.classList.toggle('active', b === btn));
+    document.querySelectorAll('.panel').forEach(p => { p.hidden = p.id !== 'panel-' + btn.dataset.tab; });
+  });
+});
 
 $('fileInput').addEventListener('change', (e) => {
   currentFile = e.target.files[0] || null;
@@ -313,6 +392,139 @@ async function doExport(tail) {
   a.download = m ? m[1] : 'utc_export.csv';
   a.click();
   URL.revokeObjectURL(a.href);
+}
+
+// ==========================================================================
+// 飞参归段
+// ==========================================================================
+const assignState = {samples: null, segments: []};
+let assignObjectUrl = null;
+
+function setAssignStatus(text, cls) {
+  const el = $('assign-status');
+  el.className = 'assign-status' + (cls ? ' ' + cls : '');
+  el.textContent = text || '';
+  el.style.display = text ? 'block' : 'none';
+}
+
+function showAssignError(msg) {
+  const el = $('assign-error');
+  el.textContent = '⚠ ' + msg;
+  el.style.display = 'block';
+}
+function hideAssignError() { $('assign-error').style.display = 'none'; }
+
+function updateAssignFileNames() {
+  const sample = assignState.samples;
+  const segments = assignState.segments;
+  const segNames = segments.map(f => f.name).join('、');
+  let text = '未选择文件';
+  if (sample || segments.length) {
+    text = `飞参：${sample ? sample.name : '未选择'}；航段：${segments.length} 份`
+      + (segments.length ? `（${segNames}）` : '');
+  }
+  $('assignFileNames').textContent = text;
+  $('assignBtn').disabled = !sample || segments.length < 1 || segments.length > 4;
+}
+
+$('assignSamplesInput').addEventListener('change', (e) => {
+  hideAssignError();
+  assignState.samples = e.target.files[0] || null;
+  updateAssignFileNames();
+});
+
+$('assignSegmentsInput').addEventListener('change', (e) => {
+  hideAssignError();
+  assignState.segments = Array.from(e.target.files || []);
+  if (assignState.segments.length > 4) {
+    showAssignError('航段 CSV 最多 4 份，请重新选择');
+  }
+  updateAssignFileNames();
+});
+
+$('assignLoadSampleBtn').addEventListener('click', async () => {
+  hideAssignError();
+  const names = ['assign_samples.csv', 'assign_segments_1.csv', 'assign_segments_2.csv'];
+  setAssignStatus('正在载入内置样例……', 'busy');
+  try {
+    const files = await Promise.all(names.map(async (name) => {
+      const resp = await fetch('/api/assign/sample/' + encodeURIComponent(name));
+      if (!resp.ok) throw new Error(`样例 ${name} 下载失败`);
+      return new File([await resp.blob()], name, {type: 'text/csv'});
+    }));
+    assignState.samples = files[0];
+    assignState.segments = files.slice(1);
+    $('assignSamplesInput').value = '';
+    $('assignSegmentsInput').value = '';
+    updateAssignFileNames();
+    setAssignStatus('已载入样例：飞参 1 份、航段 2 份，含跨文件重叠区间与边界时刻。', 'ok');
+  } catch (err) {
+    setAssignStatus('', '');
+    showAssignError('载入样例失败：' + err.message);
+  }
+});
+
+$('assignBtn').addEventListener('click', async () => {
+  if (!assignState.samples || !assignState.segments.length) return;
+  hideAssignError();
+  if (assignObjectUrl) { URL.revokeObjectURL(assignObjectUrl); assignObjectUrl = null; }
+  $('assign-summary').innerHTML = '';
+  $('assign-download').innerHTML = '';
+  setAssignStatus('正在读取全部输入并归段；结果全部写完后才会开始下载……', 'busy');
+  $('assignBtn').disabled = true;
+
+  const fd = new FormData();
+  fd.append('samples', assignState.samples);
+  assignState.segments.forEach(f => fd.append('segments', f));
+
+  try {
+    const resp = await fetch('/api/assign', {method: 'POST', body: fd});
+    if (!resp.ok) {
+      let msg = '归段失败';
+      try {
+        const data = await resp.json();
+        msg = typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail);
+      } catch (e) { /* 非 JSON 错误 */ }
+      setAssignStatus('归段失败，未生成任何结果。', 'bad');
+      showAssignError(msg);
+      return;
+    }
+
+    const blob = await resp.blob();
+    const dispo = resp.headers.get('Content-Disposition') || '';
+    const m = dispo.match(/filename="?([^";]+)"?/);
+    const downloadName = m ? m[1] : 'assign_result.csv';
+    let stats = null;
+    try { stats = JSON.parse(resp.headers.get('X-Assign-Summary') || 'null'); } catch (e) {}
+
+    assignObjectUrl = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = assignObjectUrl;
+    a.download = downloadName;
+    a.click();
+
+    setAssignStatus('归段完成，下载已开始；CSV 保留采样原列与行序，并在末尾追加归段列。', 'ok');
+    renderAssignSummary(stats);
+    $('assign-download').innerHTML = `<p class="note"><a href="${assignObjectUrl}" download="${esc(downloadName)}">⬇ 再次下载 ${esc(downloadName)}</a></p>`;
+  } catch (err) {
+    setAssignStatus('归段请求失败，未生成任何结果。', 'bad');
+    showAssignError(String(err));
+  } finally {
+    updateAssignFileNames();
+  }
+});
+
+function renderAssignSummary(stats) {
+  if (!stats) return;
+  const perFile = (stats.segment_file_counts || [])
+    .map((n, i) => `文件 ${i + 1}: ${n} 段`).join('，');
+  $('assign-summary').innerHTML = `<div class="summary-chips">
+    <span class="chip">采样 ${stats.samples}</span>
+    <span class="chip green">唯一命中 ${stats.matched}</span>
+    <span class="chip red">未命中 ${stats.unmatched}</span>
+    <span class="chip amber">多段命中 ${stats.multiple}</span>
+    <span class="chip">航段合计 ${stats.segments}（${esc(perFile)}）</span>
+  </div>`;
 }
 </script>
 </body>

@@ -5,3 +5,8 @@ services:
     ports:
       - "8000:8000"
     restart: unless-stopped
+    # 归段按行流式读写磁盘，内存只保留航段索引；限制服务容器内存上限
+    mem_limit: 256m
+    memswap_limit: 256m
+    environment:
+      - TZ=UTC
